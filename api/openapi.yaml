@@ -1,0 +1,165 @@
+openapi: 3.0.3
+info:
+  title: Forge VOD API
+  description: Video upload and streaming API. Uploads use presigned PUT URLs so clients send bytes directly to object storage.
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /videos:
+    post:
+      operationId: createVideo
+      summary: Initialize an upload and get a presigned PUT URL
+      description: >
+        Creates a video record in `pending` state and returns a presigned URL.
+        The client uploads the raw file directly to object storage with an HTTP
+        PUT to `upload_url`, then calls the complete endpoint.
+      tags: [videos]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVideoRequest'
+      responses:
+        '201':
+          description: Upload initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateVideoResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: listVideos
+      summary: List videos
+      tags: [videos]
+      responses:
+        '200':
+          description: A list of videos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Video'
+
+  /videos/{id}:
+    get:
+      operationId: getVideo
+      summary: Get a single video
+      tags: [videos]
+      parameters:
+        - $ref: '#/components/parameters/VideoId'
+      responses:
+        '200':
+          description: The video
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Video'
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /videos/{id}/complete:
+    post:
+      operationId: completeVideo
+      summary: Mark the upload finished and enqueue transcoding
+      description: >
+        Call after the PUT to `upload_url` succeeds. Transitions the video to
+        `uploaded` and enqueues a transcode job on the Redis stream.
+      tags: [videos]
+      parameters:
+        - $ref: '#/components/parameters/VideoId'
+      responses:
+        '200':
+          description: Upload completed and job enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Video'
+        '404':
+          $ref: '#/components/responses/Error'
+
+components:
+  parameters:
+    VideoId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    CreateVideoRequest:
+      type: object
+      required: [title, filename]
+      properties:
+        title:
+          type: string
+          example: My holiday clip
+        filename:
+          type: string
+          description: Original filename, used to derive the storage object key.
+          example: holiday.mp4
+        content_type:
+          type: string
+          description: MIME type of the upload; defaults to application/octet-stream.
+          example: video/mp4
+
+    CreateVideoResponse:
+      type: object
+      required: [video, upload_url, expires_in]
+      properties:
+        video:
+          $ref: '#/components/schemas/Video'
+        upload_url:
+          type: string
+          description: Presigned PUT URL. Upload the raw file here.
+        expires_in:
+          type: integer
+          description: Seconds until the presigned URL expires.
+
+    Video:
+      type: object
+      required: [id, title, status, object_key, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        status:
+          $ref: '#/components/schemas/VideoStatus'
+        object_key:
+          type: string
+          description: Key of the raw upload in the videos bucket.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    VideoStatus:
+      type: string
+      enum: [pending, uploaded, processing, ready, failed]
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
