@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -76,14 +77,26 @@ type Error struct {
 
 // Video defines model for Video.
 type Video struct {
-	CreatedAt time.Time          `json:"created_at"`
-	Id        openapi_types.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// Duration Source duration in seconds; 0 until processed.
+	Duration *float32           `json:"duration,omitempty"`
+	Id       openapi_types.UUID `json:"id"`
+
+	// MasterUrl Absolute URL of the HLS master playlist; empty until ready.
+	MasterUrl *string `json:"master_url,omitempty"`
 
 	// ObjectKey Key of the raw upload in the videos bucket.
 	ObjectKey string      `json:"object_key"`
 	Status    VideoStatus `json:"status"`
-	Title     string      `json:"title"`
-	UpdatedAt time.Time   `json:"updated_at"`
+
+	// StoryboardUrl Absolute URL of the WebVTT storyboard track; empty until ready.
+	StoryboardUrl *string `json:"storyboard_url,omitempty"`
+
+	// ThumbnailUrl Absolute URL of the poster thumbnail; empty until ready.
+	ThumbnailUrl *string   `json:"thumbnail_url,omitempty"`
+	Title        string    `json:"title"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // VideoStatus defines model for VideoStatus.
@@ -109,6 +122,9 @@ type ServerInterface interface {
 	// Mark the upload finished and enqueue transcoding
 	// (POST /videos/{id}/complete)
 	CompleteVideo(w http.ResponseWriter, r *http.Request, id VideoId)
+	// Fetch the AES-128 key for an encrypted HLS stream
+	// (GET /videos/{id}/key)
+	GetVideoKey(w http.ResponseWriter, r *http.Request, id VideoId)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -191,6 +207,32 @@ func (siw *ServerInterfaceWrapper) CompleteVideo(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CompleteVideo(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetVideoKey operation middleware
+func (siw *ServerInterfaceWrapper) GetVideoKey(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id VideoId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", mux.Vars(r)["id"], &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetVideoKey(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -320,6 +362,8 @@ func HandlerWithOptions(si ServerInterface, options GorillaServerOptions) http.H
 	r.HandleFunc(options.BaseURL+"/videos/{id}", wrapper.GetVideo).Methods(http.MethodGet)
 
 	r.HandleFunc(options.BaseURL+"/videos/{id}/complete", wrapper.CompleteVideo).Methods(http.MethodPost)
+
+	r.HandleFunc(options.BaseURL+"/videos/{id}/key", wrapper.GetVideoKey).Methods(http.MethodGet)
 
 	return r
 }
@@ -455,6 +499,48 @@ func (response CompleteVideo404JSONResponse) VisitCompleteVideoResponse(w http.R
 	return err
 }
 
+type GetVideoKeyRequestObject struct {
+	Id VideoId `json:"id"`
+}
+
+type GetVideoKeyResponseObject interface {
+	VisitGetVideoKeyResponse(w http.ResponseWriter) error
+}
+
+type GetVideoKey200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetVideoKey200ApplicationoctetStreamResponse) VisitGetVideoKeyResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetVideoKey404JSONResponse struct{ ErrorJSONResponse }
+
+func (response GetVideoKey404JSONResponse) VisitGetVideoKeyResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// List videos
@@ -469,6 +555,9 @@ type StrictServerInterface interface {
 	// Mark the upload finished and enqueue transcoding
 	// (POST /videos/{id}/complete)
 	CompleteVideo(ctx context.Context, request CompleteVideoRequestObject) (CompleteVideoResponseObject, error)
+	// Fetch the AES-128 key for an encrypted HLS stream
+	// (GET /videos/{id}/key)
+	GetVideoKey(ctx context.Context, request GetVideoKeyRequestObject) (GetVideoKeyResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -607,30 +696,61 @@ func (sh *strictHandler) CompleteVideo(w http.ResponseWriter, r *http.Request, i
 	}
 }
 
+// GetVideoKey operation middleware
+func (sh *strictHandler) GetVideoKey(w http.ResponseWriter, r *http.Request, id VideoId) {
+	var request GetVideoKeyRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetVideoKey(ctx, request.(GetVideoKeyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetVideoKey")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetVideoKeyResponseObject); ok {
+		if err := validResponse.VisitGetVideoKeyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // Base64 encoded, compressed with deflate, json marshaled OpenAPI spec.
 // Stored as a slice of fixed-width chunks rather than one concatenated
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"AAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

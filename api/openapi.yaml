@@ -84,6 +84,27 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
 
+  /videos/{id}/key:
+    get:
+      operationId: getVideoKey
+      summary: Fetch the AES-128 key for an encrypted HLS stream
+      description: >
+        Returns the raw 16-byte AES-128 key for the video. HLS players fetch
+        this automatically from the URI embedded in the encrypted playlist.
+      tags: [videos]
+      parameters:
+        - $ref: '#/components/parameters/VideoId'
+      responses:
+        '200':
+          description: Raw 16-byte AES-128 key
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/Error'
+
 components:
   parameters:
     VideoId:
@@ -152,6 +173,18 @@ components:
         updated_at:
           type: string
           format: date-time
+        duration:
+          type: number
+          description: Source duration in seconds; 0 until processed.
+        master_url:
+          type: string
+          description: Absolute URL of the HLS master playlist; empty until ready.
+        thumbnail_url:
+          type: string
+          description: Absolute URL of the poster thumbnail; empty until ready.
+        storyboard_url:
+          type: string
+          description: Absolute URL of the WebVTT storyboard track; empty until ready.
 
     VideoStatus:
       type: string

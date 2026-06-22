@@ -69,7 +69,7 @@ func main() {
 	logger.Info("database migrated")
 
 	queue := redis.NewQueue(rdb)
-	videoHandler := handlers.NewVideoHandler(videoRepo, store, queue)
+	videoHandler := handlers.NewVideoHandler(videoRepo, store, queue, cfg.PublicStreamURL)
 
 	r := mux.NewRouter()
 	r.Use(middleware.RequestLogger(logger))

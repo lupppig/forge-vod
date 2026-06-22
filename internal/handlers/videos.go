@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,13 +23,14 @@ import (
 const presignExpiry = 15 * time.Minute
 
 type VideoHandler struct {
-	repo  *video.Repository
-	store *storage.Store
-	queue *redis.Queue
+	repo            *video.Repository
+	store           *storage.Store
+	queue           *redis.Queue
+	publicStreamURL string // base URL the HLS bucket is served from
 }
 
-func NewVideoHandler(repo *video.Repository, store *storage.Store, queue *redis.Queue) *VideoHandler {
-	return &VideoHandler{repo: repo, store: store, queue: queue}
+func NewVideoHandler(repo *video.Repository, store *storage.Store, queue *redis.Queue, publicStreamURL string) *VideoHandler {
+	return &VideoHandler{repo: repo, store: store, queue: queue, publicStreamURL: publicStreamURL}
 }
 
 func (h *VideoHandler) CreateVideo(ctx context.Context, request api.CreateVideoRequestObject) (api.CreateVideoResponseObject, error) {
@@ -67,7 +70,7 @@ func (h *VideoHandler) CreateVideo(ctx context.Context, request api.CreateVideoR
 	log.Info("presigned upload url generated", slog.Duration("expires_in", presignExpiry))
 
 	return api.CreateVideo201JSONResponse{
-		Video:     toAPIVideo(v),
+		Video:     h.toAPIVideo(v),
 		UploadUrl: uploadURL,
 		ExpiresIn: int(presignExpiry.Seconds()),
 	}, nil
@@ -86,7 +89,7 @@ func (h *VideoHandler) GetVideo(ctx context.Context, request api.GetVideoRequest
 		return nil, err
 	}
 	log.Info("video fetched", slog.String("status", string(v.Status)))
-	return api.GetVideo200JSONResponse(toAPIVideo(v)), nil
+	return api.GetVideo200JSONResponse(h.toAPIVideo(v)), nil
 }
 
 func (h *VideoHandler) ListVideos(ctx context.Context, request api.ListVideosRequestObject) (api.ListVideosResponseObject, error) {
@@ -99,7 +102,7 @@ func (h *VideoHandler) ListVideos(ctx context.Context, request api.ListVideosReq
 	}
 	out := make([]api.Video, 0, len(videos))
 	for i := range videos {
-		out = append(out, toAPIVideo(&videos[i]))
+		out = append(out, h.toAPIVideo(&videos[i]))
 	}
 	log.Info("videos listed", slog.Int("count", len(out)))
 	return api.ListVideos200JSONResponse(out), nil
@@ -134,11 +137,43 @@ func (h *VideoHandler) CompleteVideo(ctx context.Context, request api.CompleteVi
 		slog.String("object_key", updated.ObjectKey),
 	)
 
-	return api.CompleteVideo200JSONResponse(toAPIVideo(updated)), nil
+	return api.CompleteVideo200JSONResponse(h.toAPIVideo(updated)), nil
 }
 
-func toAPIVideo(v *video.Video) api.Video {
-	return api.Video{
+func (h *VideoHandler) GetVideoKey(ctx context.Context, request api.GetVideoKeyRequestObject) (api.GetVideoKeyResponseObject, error) {
+	log := middleware.Logger(ctx).With(slog.String("op", "get_video_key"), slog.String("video_id", request.Id.String()))
+
+	v, err := h.repo.GetByID(ctx, request.Id)
+	if errors.Is(err, sql.ErrNoRows) {
+		log.Warn("video not found")
+		return api.GetVideoKey404JSONResponse{ErrorJSONResponse: api.ErrorJSONResponse{Message: "video not found"}}, nil
+	}
+	if err != nil {
+		log.Error("failed to fetch video", slog.Any("error", err))
+		return nil, err
+	}
+	if v.EncKeyHex == "" {
+		log.Warn("no key for video")
+		return api.GetVideoKey404JSONResponse{ErrorJSONResponse: api.ErrorJSONResponse{Message: "no key for video"}}, nil
+	}
+
+	key, err := hex.DecodeString(v.EncKeyHex)
+	if err != nil {
+		log.Error("stored key is not valid hex", slog.Any("error", err))
+		return nil, err
+	}
+
+	log.Info("served encryption key")
+	return api.GetVideoKey200ApplicationoctetStreamResponse{
+		Body:          bytes.NewReader(key),
+		ContentLength: int64(len(key)),
+	}, nil
+}
+
+// toAPIVideo maps a stored video to the API representation, building absolute
+// playback URLs from the public stream base for any artifacts that exist.
+func (h *VideoHandler) toAPIVideo(v *video.Video) api.Video {
+	out := api.Video{
 		Id:        v.ID,
 		Title:     v.Title,
 		Status:    api.VideoStatus(v.Status),
@@ -146,4 +181,24 @@ func toAPIVideo(v *video.Video) api.Video {
 		CreatedAt: v.CreatedAt,
 		UpdatedAt: v.UpdatedAt,
 	}
+	if v.Duration != 0 {
+		d := float32(v.Duration)
+		out.Duration = &d
+	}
+	if v.MasterKey != "" {
+		out.MasterUrl = h.publicURL(v.MasterKey)
+	}
+	if v.ThumbnailKey != "" {
+		out.ThumbnailUrl = h.publicURL(v.ThumbnailKey)
+	}
+	if v.StoryboardKey != "" {
+		out.StoryboardUrl = h.publicURL(v.StoryboardKey)
+	}
+	return out
+}
+
+// publicURL joins the public stream base with an object key.
+func (h *VideoHandler) publicURL(key string) *string {
+	u := h.publicStreamURL + "/" + key
+	return &u
 }
