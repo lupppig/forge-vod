@@ -1,0 +1,89 @@
+name: forge-vod
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: forge-vod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forge}
+      POSTGRES_DB: ${POSTGRES_DB:-forge_vod}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forge} -d ${POSTGRES_DB:-forge_vod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - forge-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: forge-vod-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - forge-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: forge-vod-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - forge-net
+
+  # One-shot job: waits for MinIO, then creates the buckets used by the
+  # upload/transcode pipeline. Exits 0 when done.
+  minio-init:
+    image: minio/mc:latest
+    container_name: forge-vod-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} &&
+      mc mb --ignore-existing local/${MINIO_RAW_BUCKET:-videos} &&
+      mc mb --ignore-existing local/${MINIO_HLS_BUCKET:-streams} &&
+      mc anonymous set download local/${MINIO_HLS_BUCKET:-streams} &&
+      echo 'buckets ready' &&
+      exit 0
+      "
+    networks:
+      - forge-net
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  forge-net:
+    driver: bridge
