@@ -25,3 +25,25 @@ func New(ctx context.Context, url string) (*redis.Client, error) {
 
 	return client, nil
 }
+
+const TranscodeStream = "transcode:jobs"
+
+type Queue struct {
+	client *redis.Client
+}
+
+func NewQueue(client *redis.Client) *Queue {
+	return &Queue{client: client}
+}
+
+// EnqueueTranscode appends a transcode job for the given video to the
+// transcode stream. The worker consumes this stream to produce HLS renditions.
+func (q *Queue) EnqueueTranscode(ctx context.Context, videoID, objectKey string) error {
+	return q.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: TranscodeStream,
+		Values: map[string]any{
+			"video_id":   videoID,
+			"object_key": objectKey,
+		},
+	}).Err()
+}
