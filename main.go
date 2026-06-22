@@ -8,9 +8,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/lupppig/forge-vod/config"
-	"github.com/lupppig/forge-vod/internal/postgres"
-	"github.com/lupppig/forge-vod/internal/redis"
-	"github.com/lupppig/forge-vod/internal/storage"
+	"github.com/lupppig/forge-vod/internal/repository/postgres"
+	"github.com/lupppig/forge-vod/internal/repository/redis"
+	"github.com/lupppig/forge-vod/internal/repository/storage"
 )
 
 func main() {
