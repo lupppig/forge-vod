@@ -1,4 +1,5 @@
 BINARY      := forge-vod
+WORKER      := worker
 BIN_DIR     := bin
 COMPOSE     := docker compose
 
@@ -11,7 +12,7 @@ help:
 
 .PHONY: services
 services: ## Start backing services (postgres, redis, minio) in the background
-	$(COMPOSE) up -d
+	$(COMPOSE) up -d postgres redis minio minio-init
 
 .PHONY: services-down
 services-down: ## Stop backing services
@@ -28,6 +29,18 @@ build: ## Compile the application binary into ./bin
 .PHONY: run
 run: ## Run the application from source
 	go run .
+
+.PHONY: worker
+worker: ## Run the transcode worker from source
+	go run ./cmd/worker
+
+.PHONY: worker-up
+worker-up: ## Build and start the worker as a container
+	$(COMPOSE) up -d --build worker
+
+.PHONY: worker-logs
+worker-logs: ## Tail the worker container logs
+	$(COMPOSE) logs -f worker
 
 .PHONY: up
 up: services ## Start services then run the application
