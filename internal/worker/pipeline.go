@@ -37,14 +37,21 @@ type Pipeline struct {
 	Store   ObjectStore
 	Encoder Encoder
 	Log     *slog.Logger
-	KeyURI  string // key URI embedded in encrypted playlists
+	// KeyURIBase is the API base URL serving keys; the per-video key URI
+	// embedded in playlists is <KeyURIBase>/videos/<id>/key.
+	KeyURIBase string
 }
 
-// Result summarizes what the pipeline produced for a video.
+// Result summarizes what the pipeline produced for a video. Keys are object
+// keys within the HLS bucket; the AES key itself is returned (hex) for the
+// caller to persist, never uploaded with the segments.
 type Result struct {
-	Renditions   []ffmpeg.Rendition
-	MasterPath   string
-	ThumbnailKey string
+	Renditions    []ffmpeg.Rendition
+	MasterKey     string
+	ThumbnailKey  string
+	StoryboardKey string
+	EncKeyHex     string
+	Duration      float64
 }
 
 // Process runs every stage for one video. workDir is a scratch directory the
@@ -78,7 +85,14 @@ func (p *Pipeline) Process(ctx context.Context, videoID, objectKey, workDir, out
 	if err != nil {
 		return nil, err
 	}
-	keyInfo, err := p.Encoder.WriteKeyMaterial(outDir, p.KeyURI, key)
+	// Write key material to a scratch dir OUTSIDE outDir so it is never uploaded
+	// with the segments. The playlist references the API key endpoint instead.
+	keyDir := filepath.Join(workDir, "keys")
+	if err := os.MkdirAll(keyDir, 0o755); err != nil {
+		return nil, err
+	}
+	keyURI := fmt.Sprintf("%s/videos/%s/key", p.KeyURIBase, videoID)
+	keyInfo, err := p.Encoder.WriteKeyMaterial(keyDir, keyURI, key)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +138,11 @@ func (p *Pipeline) Process(ctx context.Context, videoID, objectKey, workDir, out
 	}
 
 	return &Result{
-		Renditions:   ladder,
-		MasterPath:   fmt.Sprintf("%s/master.m3u8", outPrefix),
-		ThumbnailKey: fmt.Sprintf("%s/thumbnail.jpg", outPrefix),
+		Renditions:    ladder,
+		MasterKey:     fmt.Sprintf("%s/master.m3u8", outPrefix),
+		ThumbnailKey:  fmt.Sprintf("%s/thumbnail.jpg", outPrefix),
+		StoryboardKey: fmt.Sprintf("%s/storyboard.vtt", outPrefix),
+		EncKeyHex:     ffmpeg.KeyHex(key),
+		Duration:      info.Duration,
 	}, nil
 }

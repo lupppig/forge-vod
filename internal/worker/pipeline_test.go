@@ -31,7 +31,9 @@ func (f *fakeStore) UploadHLSDir(_ context.Context, _, prefix string) error {
 // fakeEncoder records the order stages were invoked and writes placeholder
 // outputs so later stages and uploads see files.
 type fakeEncoder struct {
-	steps []string
+	steps  []string
+	keyURI string
+	keyDir string
 }
 
 func (e *fakeEncoder) Probe(context.Context, string) (ffmpeg.MediaInfo, error) {
@@ -46,6 +48,8 @@ func (e *fakeEncoder) GenerateKey() ([]byte, error) {
 
 func (e *fakeEncoder) WriteKeyMaterial(dir, keyURI string, _ []byte) (ffmpeg.KeyInfo, error) {
 	e.steps = append(e.steps, "writekey")
+	e.keyURI = keyURI
+	e.keyDir = dir
 	return ffmpeg.KeyInfo{KeyURI: keyURI, KeyPath: filepath.Join(dir, "enc.keyinfo")}, nil
 }
 
@@ -73,13 +77,14 @@ func TestPipelineRunsAllStagesInOrder(t *testing.T) {
 	store := &fakeStore{}
 	enc := &fakeEncoder{}
 	p := &Pipeline{
-		Store:   store,
-		Encoder: enc,
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		KeyURI:  "enc.key",
+		Store:      store,
+		Encoder:    enc,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		KeyURIBase: "https://api.example.com",
 	}
 
-	res, err := p.Process(context.Background(), "vid-1", "vid-1.mp4", t.TempDir(), "vid-1")
+	workDir := t.TempDir()
+	res, err := p.Process(context.Background(), "vid-1", "vid-1.mp4", workDir, "vid-1")
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
@@ -110,7 +115,22 @@ func TestPipelineRunsAllStagesInOrder(t *testing.T) {
 	if store.uploaded != "vid-1" {
 		t.Errorf("expected upload under prefix vid-1, got %q", store.uploaded)
 	}
-	if res.MasterPath != "vid-1/master.m3u8" {
-		t.Errorf("unexpected master path %q", res.MasterPath)
+	if res.MasterKey != "vid-1/master.m3u8" {
+		t.Errorf("unexpected master key %q", res.MasterKey)
+	}
+
+	// The playlist key URI must point at the per-video API key endpoint.
+	if want := "https://api.example.com/videos/vid-1/key"; enc.keyURI != want {
+		t.Errorf("key URI = %q, want %q", enc.keyURI, want)
+	}
+	// The key material must be written OUTSIDE the uploaded output dir so it is
+	// never published to the public bucket.
+	uploadDir := filepath.Join(workDir, "out")
+	if strings.HasPrefix(enc.keyDir, uploadDir) {
+		t.Errorf("key dir %q is inside uploaded dir %q; key would leak", enc.keyDir, uploadDir)
+	}
+	// The AES key is returned for persistence, not uploaded (16 bytes -> 32 hex).
+	if len(res.EncKeyHex) != 32 {
+		t.Errorf("expected 32-char hex key, got %q", res.EncKeyHex)
 	}
 }

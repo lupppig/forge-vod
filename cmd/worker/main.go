@@ -60,10 +60,10 @@ func main() {
 	videoRepo := video.NewRepository(db)
 
 	pipeline := &worker.Pipeline{
-		Store:   store,
-		Encoder: worker.NewFFmpegEncoder(),
-		Log:     logger,
-		KeyURI:  "enc.key",
+		Store:      store,
+		Encoder:    worker.NewFFmpegEncoder(),
+		Log:        logger,
+		KeyURIBase: cfg.KeyURLBase,
 	}
 
 	w := worker.New(consumer, pipeline, videoRepo, logger, os.TempDir())

@@ -78,7 +78,7 @@ func (w *Worker) handle(ctx context.Context, job *redis.Job) {
 	}
 	defer os.RemoveAll(workDir)
 
-	_, err = w.pipeline.Process(ctx, job.VideoID, job.ObjectKey, workDir, job.VideoID)
+	result, err := w.pipeline.Process(ctx, job.VideoID, job.ObjectKey, workDir, job.VideoID)
 	if err != nil {
 		log.Error("pipeline failed", slog.Any("error", err))
 		if _, uerr := w.videos.UpdateStatus(ctx, vid, video.StatusFailed); uerr != nil {
@@ -88,7 +88,13 @@ func (w *Worker) handle(ctx context.Context, job *redis.Job) {
 		return
 	}
 
-	if _, err := w.videos.UpdateStatus(ctx, vid, video.StatusReady); err != nil {
+	if _, err := w.videos.SetPlayback(ctx, vid, video.StatusReady, video.Playback{
+		MasterKey:     result.MasterKey,
+		ThumbnailKey:  result.ThumbnailKey,
+		StoryboardKey: result.StoryboardKey,
+		EncKeyHex:     result.EncKeyHex,
+		Duration:      result.Duration,
+	}); err != nil {
 		log.Error("failed to mark ready", slog.Any("error", err))
 		return
 	}
